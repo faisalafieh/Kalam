@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: transcribe-api
+    runtime: docker
+    plan: starter          # free tier has 512 MB RAM — too little for diarization
+    healthCheckPath: /health
+    envVars:
+      - key: HF_TOKEN
+        sync: false        # set this in the Render dashboard, never in git
+      - key: WHISPER_MODEL
+        value: small
+      - key: DIARIZE
+        value: "true"
+      - key: ALLOWED_ORIGINS
+        value: https://your-site.netlify.app

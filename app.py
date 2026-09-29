@@ -30,22 +30,31 @@ MAX_MB = int(os.getenv("MAX_MB", "200"))
 state = {"asr": None, "diar": None}
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Load models once at startup rather than per request."""
+def load_models():
+    """Load the ASR model and (optionally) the diarization pipeline.
+
+    Shared by the API server and eval/evaluate.py so both run identical models.
+    """
     from faster_whisper import WhisperModel
 
-    state["asr"] = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
-
+    asr = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
+    diar = None
     if DIARIZE:
         if not HF_TOKEN:
             print("DIARIZE is on but HF_TOKEN is missing — running without speaker labels.")
         else:
             from pyannote.audio import Pipeline
 
-            state["diar"] = Pipeline.from_pretrained(
+            diar = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1", use_auth_token=HF_TOKEN
             )
+    return asr, diar
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load models once at startup rather than per request."""
+    state["asr"], state["diar"] = load_models()
     yield
     state.clear()
 
@@ -80,6 +89,41 @@ def speaker_for(turns, start: float, end: float) -> str:
     return best
 
 
+def run_pipeline(wav: str, asr, diar) -> dict:
+    """Transcribe a 16 kHz mono wav and attribute each segment to a speaker.
+
+    This is the whole Kalam pipeline; /transcribe and eval/evaluate.py both call it.
+    """
+    segments, info = asr.transcribe(wav, vad_filter=True, beam_size=1)
+    segments = list(segments)
+
+    turns = []
+    if diar is not None:
+        turns = list(diar(wav).itertracks(yield_label=True))
+
+    out = []
+    for seg in segments:
+        text = seg.text.strip()
+        if not text:
+            continue
+        out.append(
+            {
+                "speaker": speaker_for(turns, seg.start, seg.end) if turns else "SPEAKER",
+                "start": round(seg.start, 2),
+                "end": round(seg.end, 2),
+                "text": text,
+            }
+        )
+
+    return {
+        "segments": out,
+        "speakers": len({s["speaker"] for s in out}),
+        "duration": round(info.duration, 1),
+        "language": info.language,
+        "turns": [(t.start, t.end, label) for t, _, label in turns],
+    }
+
+
 @app.get("/health")
 def health():
     return {
@@ -107,33 +151,9 @@ async def transcribe(audio: UploadFile = File(...)):
         wav = os.path.join(workdir, "audio.wav")
         to_wav(raw, wav)
 
-        segments, info = state["asr"].transcribe(wav, vad_filter=True, beam_size=1)
-        segments = list(segments)
-
-        turns = []
-        if state["diar"] is not None:
-            turns = list(state["diar"](wav).itertracks(yield_label=True))
-
-        out = []
-        for seg in segments:
-            text = seg.text.strip()
-            if not text:
-                continue
-            out.append(
-                {
-                    "speaker": speaker_for(turns, seg.start, seg.end) if turns else "SPEAKER",
-                    "start": round(seg.start, 2),
-                    "end": round(seg.end, 2),
-                    "text": text,
-                }
-            )
-
-        return {
-            "segments": out,
-            "speakers": len({s["speaker"] for s in out}),
-            "duration": round(info.duration, 1),
-            "language": info.language,
-        }
+        result = run_pipeline(wav, state["asr"], state["diar"])
+        result.pop("turns")  # raw diarization turns are only needed for evaluation
+        return result
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

@@ -1,0 +1,5 @@
+# Extra dependencies for eval/ (install on top of the main requirements.txt)
+jiwer>=3.0
+pyannote.metrics>=3.2   # already pulled in by pyannote.audio; listed for clarity
+scipy>=1.11
+whisper-normalizer>=0.1.12

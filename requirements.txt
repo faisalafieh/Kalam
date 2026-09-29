@@ -4,5 +4,6 @@ python-multipart==0.0.20
 faster-whisper==1.1.1
 pyannote.audio==3.3.2
 huggingface_hub<1.0   # pyannote 3.3.x passes use_auth_token, removed in huggingface_hub 1.0
+matplotlib            # imported by pyannote.audio 3.3.x but not declared as a dependency
 torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu

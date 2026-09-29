@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+.env
+# evaluation audio and cached transcripts (large, and private for your own recordings)
+eval/data/
+eval/results/hyp/

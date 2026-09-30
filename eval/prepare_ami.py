@@ -12,6 +12,10 @@ pyannote itself reports its AMI numbers on).
     python eval/prepare_ami.py                      # 4 meetings, ~1.6 h audio
     python eval/prepare_ami.py --all                # all 16 test meetings, ~9 h
     python eval/prepare_ami.py --mic distant        # one far-field room mic
+    python eval/prepare_ami.py --split dev          # development meetings, for tuning
+
+Tune settings on --split dev, then report on the test split once. Choosing
+settings by looking at test scores overstates how well the system generalises.
 
 --mic headset   Mix-Headset: every participant's headset mixed together.
                 Clean audio, and the condition pyannote publishes DER for.
@@ -36,8 +40,11 @@ SETUP = "https://raw.githubusercontent.com/BUTSpeechFIT/AMI-diarization-setup/ma
 
 MIC_SUFFIX = {"headset": "Mix-Headset", "distant": "Array1-01"}
 
-# One meeting from each of the four test-set series (different rooms/groups).
-DEFAULT_MEETINGS = ["ES2004a", "IS1009a", "TS3003a", "EN2002a"]
+# One meeting from each series (different rooms and groups) in each split.
+DEFAULT_MEETINGS = {
+    "test": ["ES2004a", "IS1009a", "TS3003a", "EN2002a"],
+    "dev": ["ES2011a", "IS1008a", "TS3004a", "IB4001"],
+}
 
 UTTERANCE_GAP = 1.0  # seconds of silence that splits one speaker's words into utterances
 
@@ -105,7 +112,8 @@ def build_reference(zf: zipfile.ZipFile, meeting: str) -> list[dict]:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mic", choices=MIC_SUFFIX, default="headset")
-    ap.add_argument("--all", action="store_true", help="all 16 test meetings")
+    ap.add_argument("--split", choices=DEFAULT_MEETINGS, default="test")
+    ap.add_argument("--all", action="store_true", help="every meeting in the split (16 test / 18 dev)")
     ap.add_argument("--meetings", nargs="+", help="explicit meeting IDs")
     ap.add_argument("--out", default=str(Path(__file__).parent / "data" / "ami"))
     args = ap.parse_args()
@@ -116,9 +124,9 @@ def main():
     if args.meetings:
         meetings = args.meetings
     elif args.all:
-        meetings = fetch(f"{SETUP}/lists/test.meetings.txt").decode().split()
+        meetings = fetch(f"{SETUP}/lists/{args.split}.meetings.txt").decode().split()
     else:
-        meetings = DEFAULT_MEETINGS
+        meetings = DEFAULT_MEETINGS[args.split]
 
     ann_zip = out / "ami_public_manual_1.6.2.zip"
     print("Annotations")
@@ -126,7 +134,8 @@ def main():
     zf = zipfile.ZipFile(io.BytesIO(ann_zip.read_bytes()))
 
     suffix = MIC_SUFFIX[args.mic]
-    manifest = out / f"manifest_{args.mic}.jsonl"
+    prefix = "manifest" if args.split == "test" else f"manifest_{args.split}"
+    manifest = out / f"{prefix}_{args.mic}.jsonl"
     with open(manifest, "w") as mf:
         for m in meetings:
             print(m)
@@ -136,8 +145,8 @@ def main():
             ref = out / "ref" / f"{m}.json"
 
             download(AUDIO.format(m=m, suffix=suffix), audio)
-            download(f"{SETUP}/only_words/rttms/test/{m}.rttm", rttm)
-            download(f"{SETUP}/uems/test/{m}.uem", uem)
+            download(f"{SETUP}/only_words/rttms/{args.split}/{m}.rttm", rttm)
+            download(f"{SETUP}/uems/{args.split}/{m}.uem", uem)
             if not ref.exists():
                 ref.parent.mkdir(parents=True, exist_ok=True)
                 ref.write_text(json.dumps(build_reference(zf, m), indent=0))
@@ -151,7 +160,8 @@ def main():
             }) + "\n")
 
     print(f"\nManifest written: {manifest}")
-    print(f"Next:  python eval/evaluate.py --manifest {manifest} --tag ami-{args.mic}")
+    tag = f"ami-{args.mic}" if args.split == "test" else f"ami-{args.split}-{args.mic}"
+    print(f"Next:  python eval/evaluate.py --manifest {manifest} --tag {tag}")
 
 
 if __name__ == "__main__":

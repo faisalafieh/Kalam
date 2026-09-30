@@ -32,6 +32,9 @@ BEAM_SIZE = int(os.getenv("BEAM_SIZE", "5"))                # 1 = greedy: faster
 # Conditioning each 30 s window on the previous text lets one bad window derail
 # the rest (repetition loops, skipped stretches). Off is safer for long meetings.
 CONDITION_ON_PREVIOUS = os.getenv("CONDITION_ON_PREVIOUS", "false").lower() == "true"
+# Assign speakers word by word (using Whisper word timestamps) instead of giving
+# a whole segment to one speaker. Fixes segments that span a change of speaker.
+WORD_SPEAKERS = os.getenv("WORD_SPEAKERS", "true").lower() == "true"
 # ---------------------------------------------------------------------------
 
 state = {"asr": None, "diar": None}
@@ -55,6 +58,10 @@ def load_models():
             diar = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1", use_auth_token=HF_TOKEN
             )
+            if DEVICE == "cuda":
+                import torch
+
+                diar.to(torch.device("cuda"))  # pyannote stays on CPU unless moved
     return asr, diar
 
 
@@ -86,14 +93,78 @@ def to_wav(src: str, dst: str) -> None:
         raise HTTPException(400, f"Could not decode audio: {result.stderr.decode()[-400:]}")
 
 
+class SpeakerIndex:
+    """Fast lookup of which diarized speaker was talking during [start, end]."""
+
+    def __init__(self, turns):
+        import bisect
+
+        self._bisect = bisect
+        self.turns = sorted((float(t.start), float(t.end), label) for t, _, label in turns)
+        self.starts = [t[0] for t in self.turns]
+        self.max_len = max((e - s for s, e, _ in self.turns), default=0.0)
+
+    def speaker(self, start: float, end: float) -> str:
+        """Speaker with the most overlap; if nobody overlaps, the nearest turn."""
+        if not self.turns:
+            return "SPEAKER"
+        hi = self._bisect.bisect_right(self.starts, end)
+        lo = self._bisect.bisect_left(self.starts, start - self.max_len)
+        best, best_overlap = None, 0.0
+        for s, e, label in self.turns[lo:hi]:
+            overlap = min(end, e) - max(start, s)
+            if overlap > best_overlap:
+                best, best_overlap = label, overlap
+        if best is not None:
+            return best
+        mid = (start + end) / 2
+        i = self._bisect.bisect_left(self.starts, mid)
+        near = self.turns[max(0, i - 2): i + 2]
+        return min(near, key=lambda t: max(t[0] - mid, mid - t[1], 0.0))[2]
+
+
 def speaker_for(turns, start: float, end: float) -> str:
     """Pick the speaker whose turns overlap this segment the most."""
-    best, best_overlap = "SPEAKER_00", 0.0
-    for turn, _, label in turns:
-        overlap = min(end, turn.end) - max(start, turn.start)
-        if overlap > best_overlap:
-            best, best_overlap = label, overlap
-    return best
+    return SpeakerIndex(turns).speaker(start, end)
+
+
+def attribute(segments, index: SpeakerIndex) -> list[dict]:
+    """Split Whisper segments into speaker runs.
+
+    With word timestamps, every word is labelled on its own and consecutive words
+    from the same speaker are merged back into one segment. Without them (or for
+    a segment with no word timings), the whole segment goes to one speaker.
+    """
+    out = []
+
+    def emit(speaker, start, end, text):
+        text = text.strip()
+        if not text:
+            return
+        if index.turns and out and out[-1]["speaker"] == speaker and start - out[-1]["end"] < 1.0:
+            out[-1]["text"] += " " + text
+            out[-1]["end"] = round(end, 2)
+        else:
+            out.append({"speaker": speaker, "start": round(start, 2), "end": round(end, 2), "text": text})
+
+    for seg in segments:
+        words = getattr(seg, "words", None)
+        if WORD_SPEAKERS and words:
+            run_spk, run_start, run_end, run_text = None, 0.0, 0.0, ""
+            for w in words:
+                spk = index.speaker(w.start, w.end)
+                if spk != run_spk and run_text:
+                    emit(run_spk, run_start, run_end, run_text)
+                    run_text = ""
+                if not run_text:
+                    run_spk, run_start = spk, w.start
+                run_text += w.word
+                run_end = w.end
+            if run_text:
+                emit(run_spk, run_start, run_end, run_text)
+        else:
+            emit(index.speaker(seg.start, seg.end), seg.start, seg.end, seg.text)
+    return out
 
 
 def run_pipeline(wav: str, asr, diar) -> dict:
@@ -106,6 +177,7 @@ def run_pipeline(wav: str, asr, diar) -> dict:
         language=None if LANGUAGE == "auto" else LANGUAGE,
         beam_size=BEAM_SIZE,
         condition_on_previous_text=CONDITION_ON_PREVIOUS,
+        word_timestamps=WORD_SPEAKERS and diar is not None,
         vad_filter=True,
     )
     segments = list(segments)
@@ -114,19 +186,7 @@ def run_pipeline(wav: str, asr, diar) -> dict:
     if diar is not None:
         turns = list(diar(wav).itertracks(yield_label=True))
 
-    out = []
-    for seg in segments:
-        text = seg.text.strip()
-        if not text:
-            continue
-        out.append(
-            {
-                "speaker": speaker_for(turns, seg.start, seg.end) if turns else "SPEAKER",
-                "start": round(seg.start, 2),
-                "end": round(seg.end, 2),
-                "text": text,
-            }
-        )
+    out = attribute(segments, SpeakerIndex(turns))
 
     return {
         "segments": out,

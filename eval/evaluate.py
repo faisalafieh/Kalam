@@ -93,7 +93,8 @@ def write_results_md() -> None:
             f"| {r['tag']} | {s['files']} | {s['audio_hours']:.2f} h | {pct(s['wer'])} | "
             f"{pct(s['cpwer'])} | {pct(s['der'])} | {s['rtf']:.2f} | "
             f"whisper-{r['config']['whisper_model']} ({r['config']['compute_type']}, "
-            f"beam {r['config'].get('beam_size', 1)}, lang {r['config'].get('language', 'auto')}) + "
+            f"beam {r['config'].get('beam_size', 1)}, lang {r['config'].get('language', 'auto')}, "
+            f"{'word' if r['config'].get('word_speakers') else 'segment'}-level speakers) + "
             f"{'pyannote 3.1' if r['config']['diarization'] else 'no diarization'} | "
             f"{r['config']['hardware']} | {r['config']['commit']} | {r['date'][:10]} |"
         )
@@ -216,6 +217,7 @@ def main():
         "language": app.LANGUAGE,
         "beam_size": app.BEAM_SIZE,
         "condition_on_previous_text": app.CONDITION_ON_PREVIOUS,
+        "word_speakers": app.WORD_SPEAKERS,
         "device": app.DEVICE,
         "diarization": diarized,
         "hardware": args.hardware,

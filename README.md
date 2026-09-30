@@ -97,6 +97,19 @@ python eval/evaluate.py --manifest eval/data/ami/manifest_distant.jsonl --tag am
 
 Add `--all` to `prepare_ami.py` for all 16 test meetings (~9 h of audio).
 
+Compare settings on the development meetings (`--split dev`) and run the test
+set once with the configuration chosen there; picking settings by their test
+score overstates accuracy.
+
+### On a GPU (Google Colab)
+
+Large Whisper models are slow on a laptop CPU. `eval/kalam_colab.ipynb` runs the
+whole protocol on a free Colab T4: compares small, large-v3-turbo and large-v3
+(plus a word- vs segment-level speaker ablation) on the dev meetings, picks the
+best by dev cpWER, then runs the full test set once.
+[Open in Colab](https://colab.research.google.com/github/faisalafieh/kalam/blob/main/eval/kalam_colab.ipynb)
+(for a private repo, upload the notebook to Colab instead).
+
 ### Your own recordings
 
 Put audio and a hand-checked transcript side by side and list them in a
@@ -137,6 +150,7 @@ the browser will block the upload.
 | `LANGUAGE` | `en` | Spoken language code, or `auto` to let Whisper detect it (unreliable with accented speakers) |
 | `BEAM_SIZE` | `5` | Beam search width; `1` is faster but drops more speech |
 | `CONDITION_ON_PREVIOUS` | `false` | Feed each window the previous text; `true` can cause repetition loops on long audio |
+| `WORD_SPEAKERS` | `true` | Assign speakers per word (Whisper word timestamps) rather than per segment |
 | `DIARIZE` | `true` | Set `false` to return transcripts without speaker labels |
 | `DEVICE` | `cpu` | `cuda` when a GPU is available |
 | `COMPUTE_TYPE` | `int8` | `float16` on GPU |

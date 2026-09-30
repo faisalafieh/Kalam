@@ -92,7 +92,8 @@ def write_results_md() -> None:
         lines.append(
             f"| {r['tag']} | {s['files']} | {s['audio_hours']:.2f} h | {pct(s['wer'])} | "
             f"{pct(s['cpwer'])} | {pct(s['der'])} | {s['rtf']:.2f} | "
-            f"whisper-{r['config']['whisper_model']} ({r['config']['compute_type']}) + "
+            f"whisper-{r['config']['whisper_model']} ({r['config']['compute_type']}, "
+            f"beam {r['config'].get('beam_size', 1)}, lang {r['config'].get('language', 'auto')}) + "
             f"{'pyannote 3.1' if r['config']['diarization'] else 'no diarization'} | "
             f"{r['config']['hardware']} | {r['config']['commit']} | {r['date'][:10]} |"
         )
@@ -101,14 +102,16 @@ def write_results_md() -> None:
             "",
             f"## {r['tag']}",
             "",
-            "| File | Minutes | Ref words | WER | cpWER | DER | Speakers (ref / found) |",
-            "|---|---|---|---|---|---|---|",
+            "| File | Minutes | Ref words | WER | Sub / Del / Ins | cpWER | DER | Speakers (ref / found) | Language |",
+            "|---|---|---|---|---|---|---|---|---|",
         ]
         for f in r["files"]:
+            w = f["wer"]
             lines.append(
                 f"| {f['id']} | {f['duration'] / 60:.1f} | {f['wer']['ref_words']} | "
-                f"{pct(f['wer_rate'])} | {pct(f['cpwer_rate'])} | {pct(f['der_rate'])} | "
-                f"{f['cpwer']['ref_speakers']} / {f['cpwer']['hyp_speakers']} |"
+                f"{pct(f['wer_rate'])} | {w['sub']} / {w['del']} / {w['ins']} | "
+                f"{pct(f['cpwer_rate'])} | {pct(f['der_rate'])} | "
+                f"{f['cpwer']['ref_speakers']} / {f['cpwer']['hyp_speakers']} | {f.get('language', '?')} |"
             )
         s = r["summary"]
         w = s["wer_counts"]
@@ -193,6 +196,7 @@ def main():
         f = {
             "id": it["id"],
             "duration": hyp["duration"],
+            "language": hyp.get("language"),
             "wer": wer_c,
             "wer_rate": metrics.rate(wer_c),
             "cpwer": cp_c,
@@ -201,11 +205,17 @@ def main():
             "der_rate": metrics.der_rate(der_c) if der_c else float("nan"),
         }
         files.append(f)
-        print(f"[{it['id']}] WER {pct(f['wer_rate'])}  cpWER {pct(f['cpwer_rate'])}  DER {pct(f['der_rate'])}")
+        print(
+            f"[{it['id']}] WER {pct(f['wer_rate'])} (sub {wer_c['sub']} / del {wer_c['del']} / ins {wer_c['ins']})"
+            f"  cpWER {pct(f['cpwer_rate'])}  DER {pct(f['der_rate'])}  lang {f['language']}"
+        )
 
     config = {
         "whisper_model": app.WHISPER_MODEL,
         "compute_type": app.COMPUTE_TYPE,
+        "language": app.LANGUAGE,
+        "beam_size": app.BEAM_SIZE,
+        "condition_on_previous_text": app.CONDITION_ON_PREVIOUS,
         "device": app.DEVICE,
         "diarization": diarized,
         "hardware": args.hardware,

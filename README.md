@@ -134,6 +134,9 @@ the browser will block the upload.
 |---|---|---|
 | `HF_TOKEN` | — | Hugging Face token, required for diarization |
 | `WHISPER_MODEL` | `small` | `tiny` and `base` are much faster on CPU and much less accurate |
+| `LANGUAGE` | `en` | Spoken language code, or `auto` to let Whisper detect it (unreliable with accented speakers) |
+| `BEAM_SIZE` | `5` | Beam search width; `1` is faster but drops more speech |
+| `CONDITION_ON_PREVIOUS` | `false` | Feed each window the previous text; `true` can cause repetition loops on long audio |
 | `DIARIZE` | `true` | Set `false` to return transcripts without speaker labels |
 | `DEVICE` | `cpu` | `cuda` when a GPU is available |
 | `COMPUTE_TYPE` | `int8` | `float16` on GPU |

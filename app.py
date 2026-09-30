@@ -25,6 +25,13 @@ DIARIZE = os.getenv("DIARIZE", "true").lower() == "true"
 HF_TOKEN = os.getenv("HF_TOKEN")                           # required for pyannote
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 MAX_MB = int(os.getenv("MAX_MB", "200"))
+# Fix the spoken language. "auto" lets Whisper guess from the first 30 s, which
+# fails on accented speakers (e.g. Dutch speakers of English get Dutch output).
+LANGUAGE = os.getenv("LANGUAGE", "en")
+BEAM_SIZE = int(os.getenv("BEAM_SIZE", "5"))                # 1 = greedy: faster, skips more speech
+# Conditioning each 30 s window on the previous text lets one bad window derail
+# the rest (repetition loops, skipped stretches). Off is safer for long meetings.
+CONDITION_ON_PREVIOUS = os.getenv("CONDITION_ON_PREVIOUS", "false").lower() == "true"
 # ---------------------------------------------------------------------------
 
 state = {"asr": None, "diar": None}
@@ -94,7 +101,13 @@ def run_pipeline(wav: str, asr, diar) -> dict:
 
     This is the whole Kalam pipeline; /transcribe and eval/evaluate.py both call it.
     """
-    segments, info = asr.transcribe(wav, vad_filter=True, beam_size=1)
+    segments, info = asr.transcribe(
+        wav,
+        language=None if LANGUAGE == "auto" else LANGUAGE,
+        beam_size=BEAM_SIZE,
+        condition_on_previous_text=CONDITION_ON_PREVIOUS,
+        vad_filter=True,
+    )
     segments = list(segments)
 
     turns = []

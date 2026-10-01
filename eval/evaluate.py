@@ -15,7 +15,9 @@ Reference formats:
     .txt   one utterance per line as "Speaker name: what they said".
            Lines without a "Name:" prefix are attributed to UNKNOWN.
 
-Hypotheses are cached in eval/results/hyp/<tag>/ so re-scoring is instant:
+Hypotheses are cached in eval/results/hyp/<tag>/. Re-running the same tag skips
+files that are already transcribed (resume after a crash); --fresh redoes them.
+Re-score cached transcripts without loading any model:
     python eval/evaluate.py --manifest ... --tag ... --rescore
 
 Writes eval/results/<tag>.json and regenerates eval/RESULTS.md.
@@ -38,7 +40,9 @@ sys.path.insert(0, str(HERE.parent))
 
 import metrics  # noqa: E402
 
-RESULTS_DIR = HERE / "results"
+# KALAM_RESULTS_DIR lets results live somewhere that survives a dropped session
+# (e.g. Google Drive on Colab). Transcripts cached there are reused on re-runs.
+RESULTS_DIR = Path(os.getenv("KALAM_RESULTS_DIR", HERE / "results"))
 
 
 def load_reference(path: Path) -> list[dict]:
@@ -128,7 +132,10 @@ def write_results_md() -> None:
                 f"false alarm {pct(d['false_alarm'] / d['total'])}, "
                 f"confusion {pct(d['confusion'] / d['total'])}."
             )
-    (HERE / "RESULTS.md").write_text("\n".join(lines) + "\n")
+    text = "\n".join(lines) + "\n"
+    (HERE / "RESULTS.md").write_text(text)
+    if RESULTS_DIR != HERE / "results":
+        (RESULTS_DIR / "RESULTS.md").write_text(text)
 
 
 def main():
@@ -136,6 +143,7 @@ def main():
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--tag", required=True, help="name for this run, e.g. ami-headset")
     ap.add_argument("--rescore", action="store_true", help="reuse cached hypotheses, skip inference")
+    ap.add_argument("--fresh", action="store_true", help="ignore cached transcripts for this tag and redo them")
     ap.add_argument("--hardware", default=f"{platform.system()} {platform.machine()}, {os.cpu_count()} CPU threads",
                     help="free-text hardware description for the results table")
     args = ap.parse_args()
@@ -148,12 +156,16 @@ def main():
 
     import app  # the production module: same models, same settings, same code path
 
-    asr = diar = None
-    if not args.rescore:
-        print(f"Loading whisper-{app.WHISPER_MODEL} on {app.DEVICE} ({app.COMPUTE_TYPE})...")
-        asr, diar = app.load_models()
-        if app.DIARIZE and diar is None:
-            print("WARNING: diarization is off (no HF_TOKEN). cpWER will treat everything as one speaker.")
+    models = {}
+
+    def get_models():
+        """Load models only when a file actually needs transcribing."""
+        if not models:
+            print(f"Loading whisper-{app.WHISPER_MODEL} on {app.DEVICE} ({app.COMPUTE_TYPE})...", flush=True)
+            models["asr"], models["diar"] = app.load_models()
+            if app.DIARIZE and models["diar"] is None:
+                print("WARNING: diarization is off (no HF_TOKEN). cpWER will treat everything as one speaker.")
+        return models["asr"], models["diar"]
 
     files = []
     tot = {k: {"sub": 0, "del": 0, "ins": 0, "ref_words": 0} for k in ("wer", "cpwer")}
@@ -163,11 +175,14 @@ def main():
 
     for it in items:
         cache = hyp_dir / f"{it['id']}.json"
-        if args.rescore:
-            if not cache.exists():
-                sys.exit(f"--rescore but no cached hypothesis for {it['id']}")
+        if args.rescore and not cache.exists():
+            sys.exit(f"--rescore but no cached hypothesis for {it['id']}")
+        if cache.exists() and not args.fresh:
             hyp = json.loads(cache.read_text())
+            if not args.rescore:
+                print(f"[{it['id']}] already transcribed, reusing", flush=True)
         else:
+            asr, diar = get_models()
             print(f"[{it['id']}] transcribing...", flush=True)
             with tempfile.TemporaryDirectory() as tmp:
                 wav = os.path.join(tmp, "audio.wav")

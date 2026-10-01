@@ -104,9 +104,9 @@ score overstates accuracy.
 ### On a GPU (Google Colab)
 
 Large Whisper models are slow on a laptop CPU. `eval/kalam_colab.ipynb` runs the
-whole protocol on a free Colab T4: compares small, large-v3-turbo and large-v3
+whole protocol on a free Colab T4: compares the original configuration, small, large-v3-turbo and large-v3, with and without speech separation
 (plus a word- vs segment-level speaker ablation) on the dev meetings, picks the
-best by dev cpWER, then runs the full test set once.
+best by dev cpWER, then runs the full test set once with both the original and the selected configuration.
 [Open in Colab](https://colab.research.google.com/github/faisalafieh/kalam/blob/main/eval/kalam_colab.ipynb)
 (for a private repo, upload the notebook to Colab instead).
 
@@ -150,6 +150,7 @@ the browser will block the upload.
 | `LANGUAGE` | `en` | Spoken language code, or `auto` to let Whisper detect it (unreliable with accented speakers) |
 | `BEAM_SIZE` | `5` | Beam search width; `1` is faster but drops more speech |
 | `CONDITION_ON_PREVIOUS` | `false` | Feed each window the previous text; `true` can cause repetition loops on long audio |
+| `SEPARATE` | `false` | Separate overlapping speakers into one stream each before transcribing (needs `pyannote.audio[separation]`, a GPU, and accepted terms on `pyannote/speech-separation-ami-1.0`) |
 | `WORD_SPEAKERS` | `true` | Assign speakers per word (Whisper word timestamps) rather than per segment |
 | `DIARIZE` | `true` | Set `false` to return transcripts without speaker labels |
 | `DEVICE` | `cpu` | `cuda` when a GPU is available |

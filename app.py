@@ -35,6 +35,12 @@ CONDITION_ON_PREVIOUS = os.getenv("CONDITION_ON_PREVIOUS", "false").lower() == "
 # Assign speakers word by word (using Whisper word timestamps) instead of giving
 # a whole segment to one speaker. Fixes segments that span a change of speaker.
 WORD_SPEAKERS = os.getenv("WORD_SPEAKERS", "true").lower() == "true"
+# Separate overlapping speakers into one audio stream each (pyannote PixIT model,
+# trained on AMI) and transcribe every stream on its own, so crosstalk is not lost.
+# Heavier: needs `pip install "pyannote.audio[separation]==3.3.2"` and a GPU in practice.
+SEPARATE = os.getenv("SEPARATE", "false").lower() == "true"
+SEPARATION_MODEL = "pyannote/speech-separation-ami-1.0"
+DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 # ---------------------------------------------------------------------------
 
 state = {"asr": None, "diar": None}
@@ -56,7 +62,7 @@ def load_models():
             from pyannote.audio import Pipeline
 
             diar = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1", use_auth_token=HF_TOKEN
+                SEPARATION_MODEL if SEPARATE else DIARIZATION_MODEL, use_auth_token=HF_TOKEN
             )
             if DEVICE == "cuda":
                 import torch
@@ -167,18 +173,62 @@ def attribute(segments, index: SpeakerIndex) -> list[dict]:
     return out
 
 
+def _asr_options() -> dict:
+    return dict(
+        language=None if LANGUAGE == "auto" else LANGUAGE,
+        beam_size=BEAM_SIZE,
+        condition_on_previous_text=CONDITION_ON_PREVIOUS,
+        vad_filter=True,
+    )
+
+
+def run_separated(wav: str, asr, sep) -> dict:
+    """Separation mode: one isolated stream per speaker, each transcribed alone.
+
+    Every word in a stream belongs to that stream's speaker, so overlapping speech
+    is transcribed for both people instead of one voice drowning out the other.
+    """
+    import numpy as np
+
+    diarization, sources = sep(wav)
+    out, language, duration = [], None, 0.0
+    # Source column s belongs to the s-th label (pyannote model card convention).
+    for s, speaker in enumerate(diarization.labels()):
+        if s >= sources.data.shape[1]:
+            break
+        audio = np.ascontiguousarray(sources.data[:, s], dtype=np.float32)
+        peak = float(np.abs(audio).max())
+        if peak < 1e-4:
+            continue  # silent stream
+        audio *= 0.9 / peak  # separated streams come out at arbitrary gain
+        segments, info = asr.transcribe(audio, **_asr_options())
+        language = language or info.language
+        duration = max(duration, info.duration)
+        for seg in segments:
+            text = seg.text.strip()
+            if text:
+                out.append({"speaker": speaker, "start": round(seg.start, 2),
+                            "end": round(seg.end, 2), "text": text})
+    out.sort(key=lambda x: (x["start"], x["end"]))
+    turns = [(t.start, t.end, label) for t, _, label in diarization.itertracks(yield_label=True)]
+    return {
+        "segments": out,
+        "speakers": len({x["speaker"] for x in out}),
+        "duration": round(duration, 1),
+        "language": language or LANGUAGE,
+        "turns": turns,
+    }
+
+
 def run_pipeline(wav: str, asr, diar) -> dict:
     """Transcribe a 16 kHz mono wav and attribute each segment to a speaker.
 
     This is the whole Kalam pipeline; /transcribe and eval/evaluate.py both call it.
     """
+    if SEPARATE and diar is not None:
+        return run_separated(wav, asr, diar)
     segments, info = asr.transcribe(
-        wav,
-        language=None if LANGUAGE == "auto" else LANGUAGE,
-        beam_size=BEAM_SIZE,
-        condition_on_previous_text=CONDITION_ON_PREVIOUS,
-        word_timestamps=WORD_SPEAKERS and diar is not None,
-        vad_filter=True,
+        wav, word_timestamps=WORD_SPEAKERS and diar is not None, **_asr_options()
     )
     segments = list(segments)
 

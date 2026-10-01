@@ -173,6 +173,23 @@ def attribute(segments, index: SpeakerIndex) -> list[dict]:
     return out
 
 
+def load_wav(path: str):
+    """Read the 16 kHz mono wav produced by to_wav() as float32 samples.
+
+    Passing samples to Whisper skips its own PyAV-based decoder, which breaks
+    whenever the installed PyAV is newer than faster-whisper expects.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    audio, sr = sf.read(path, dtype="float32", always_2d=False)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    if sr != 16000:
+        raise ValueError(f"expected 16 kHz audio, got {sr} Hz (run it through to_wav first)")
+    return np.ascontiguousarray(audio)
+
+
 def _asr_options() -> dict:
     return dict(
         language=None if LANGUAGE == "auto" else LANGUAGE,
@@ -228,7 +245,7 @@ def run_pipeline(wav: str, asr, diar) -> dict:
     if SEPARATE and diar is not None:
         return run_separated(wav, asr, diar)
     segments, info = asr.transcribe(
-        wav, word_timestamps=WORD_SPEAKERS and diar is not None, **_asr_options()
+        load_wav(wav), word_timestamps=WORD_SPEAKERS and diar is not None, **_asr_options()
     )
     segments = list(segments)
 

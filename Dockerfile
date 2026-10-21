@@ -11,6 +11,10 @@ ENV HF_HOME=/app/.cache/huggingface \
     PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=2
 
+# Hosts like Hugging Face Spaces run the container as a non-root user (uid 1000),
+# so the model cache must be writable by anyone.
+RUN mkdir -p /app/.cache && chmod -R 777 /app/.cache
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

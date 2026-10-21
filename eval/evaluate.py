@@ -8,7 +8,12 @@ Manifest: one JSON object per line. Paths are relative to the manifest file.
      "audio": "hearing01.m4a",
      "reference": "hearing01.txt",     # required
      "rttm": "hearing01.rttm",         # optional, enables DER
-     "uem":  "hearing01.uem"}          # optional, scoring region for DER
+     "uem":  "hearing01.uem",          # optional, scoring region for DER
+     "dialect": "gulf",                # optional: Arabic dialect, or "auto" (default: DIALECT env)
+     "num_speakers": 3}                # optional: known speaker count for diarization
+
+Language and model come from the environment for the whole run (LANGUAGE=ar uses
+ARABIC_MODEL), so score each language, and ideally each dialect, as its own tag.
 
 Reference formats:
     .json  [{"speaker": "A", "text": "..."}, ...] in chronological order
@@ -97,7 +102,8 @@ def write_results_md() -> None:
             f"| {r['tag']} | {s['files']} | {s['audio_hours']:.2f} h | {pct(s['wer'])} | "
             f"{pct(s['cpwer'])} | {pct(s['der'])} | {s['rtf']:.2f} | "
             f"whisper-{r['config']['whisper_model']} ({r['config']['compute_type']}, "
-            f"beam {r['config'].get('beam_size', 1)}, lang {r['config'].get('language', 'auto')}, "
+            f"beam {r['config'].get('beam_size', 1)}, lang {r['config'].get('language', 'auto')}"
+            f"{', dialect ' + r['config']['dialect'] if r['config'].get('dialect') else ''}, "
             f"{'separated streams' if r['config'].get('separation') else ('word' if r['config'].get('word_speakers') else 'segment') + '-level speakers'}) + "
             f"{'pyannote 3.1' if r['config']['diarization'] else 'no diarization'} | "
             f"{r['config']['hardware']} | {r['config']['commit']} | {r['date'][:10]} |"
@@ -116,7 +122,8 @@ def write_results_md() -> None:
                 f"| {f['id']} | {f['duration'] / 60:.1f} | {f['wer']['ref_words']} | "
                 f"{pct(f['wer_rate'])} | {w['sub']} / {w['del']} / {w['ins']} | "
                 f"{pct(f['cpwer_rate'])} | {pct(f['der_rate'])} | "
-                f"{f['cpwer']['ref_speakers']} / {f['cpwer']['hyp_speakers']} | {f.get('language', '?')} |"
+                f"{f['cpwer']['ref_speakers']} / {f['cpwer']['hyp_speakers']} | {f.get('language', '?')}"
+                f"{' (' + f['dialect'] + ')' if f.get('dialect') else ''} |"
             )
         s = r["summary"]
         w = s["wer_counts"]
@@ -161,7 +168,7 @@ def main():
     def get_models():
         """Load models only when a file actually needs transcribing."""
         if not models:
-            print(f"Loading whisper-{app.WHISPER_MODEL} on {app.DEVICE} ({app.COMPUTE_TYPE})...", flush=True)
+            print(f"Loading whisper-{app.model_for(app.LANGUAGE)} on {app.DEVICE} ({app.COMPUTE_TYPE})...", flush=True)
             models["asr"], models["diar"] = app.load_models()
             if app.DIARIZE and models["diar"] is None:
                 print("WARNING: diarization is off (no HF_TOKEN). cpWER will treat everything as one speaker.")
@@ -188,7 +195,10 @@ def main():
                 wav = os.path.join(tmp, "audio.wav")
                 t0 = time.perf_counter()
                 app.to_wav(str(base / it["audio"]), wav)
-                hyp = app.run_pipeline(wav, asr, diar)
+                req = app.Request(
+                    dialect=it.get("dialect", app.DIALECT), num_speakers=it.get("num_speakers")
+                )
+                hyp = app.run_pipeline(wav, asr, diar, req)
                 hyp["processing_seconds"] = time.perf_counter() - t0
             cache.write_text(json.dumps(hyp, indent=1))
 
@@ -213,6 +223,7 @@ def main():
             "id": it["id"],
             "duration": hyp["duration"],
             "language": hyp.get("language"),
+            "dialect": hyp.get("dialect"),
             "wer": wer_c,
             "wer_rate": metrics.rate(wer_c),
             "cpwer": cp_c,
@@ -227,7 +238,10 @@ def main():
         )
 
     config = {
-        "whisper_model": app.WHISPER_MODEL,
+        "whisper_model": app.model_for(app.LANGUAGE),
+        "dialect": app.DIALECT if app.LANGUAGE in app.ARABIC_LANGUAGES else None,
+        "vocabulary": bool(app.VOCABULARY),
+        "audio_filter": app.AUDIO_FILTER or None,
         "compute_type": app.COMPUTE_TYPE,
         "language": app.LANGUAGE,
         "beam_size": app.BEAM_SIZE,

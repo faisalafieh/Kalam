@@ -1,0 +1,73 @@
+# Deploys the Kalam API to Modal (GPU, scales to zero, free monthly credits).
+#
+# One-time setup:
+#   1. modal.com: sign up, then Settings -> API Tokens -> New Token.
+#   2. GitHub repo -> Settings -> Secrets and variables -> Actions, add secrets:
+#        MODAL_TOKEN_ID      (starts with ak-)
+#        MODAL_TOKEN_SECRET  (starts with as-)
+#        HF_TOKEN            Hugging Face token with the pyannote terms accepted
+#      Optional variable ALLOWED_ORIGINS = your frontend URL.
+#   3. Actions tab -> "Deploy to Modal" -> Run workflow.
+# Every push to main redeploys afterwards.
+
+name: Deploy to Modal
+
+on:
+  push:
+    branches: [main]
+    paths: ["app.py", "arabic.py", "modal_app.py", ".github/workflows/deploy-modal.yml"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        run: |
+          missing=""
+          [ -z "$MODAL_TOKEN_ID" ] && missing="$missing MODAL_TOKEN_ID"
+          [ -z "$MODAL_TOKEN_SECRET" ] && missing="$missing MODAL_TOKEN_SECRET"
+          [ -z "$HF_TOKEN" ] && missing="$missing HF_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::error title=Missing secrets::Add these repository secrets:$missing (see the top of deploy-modal.yml)."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install "modal>=1.6,<2"
+
+      - name: Store the Hugging Face token in Modal
+        run: |
+          modal secret create kalam-hf HF_TOKEN="$(echo -n "$HF_TOKEN" | tr -d '[:space:]')" \
+            ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-*}" --force > /dev/null \
+            || { echo "::error title=Modal login failed::Check MODAL_TOKEN_ID and MODAL_TOKEN_SECRET."; exit 1; }
+
+      - name: Deploy
+        run: |
+          set -o pipefail
+          if ! modal deploy modal_app.py 2>&1 | tee deploy.log; then
+            err=$(grep -iE "error|exception|denied|unauthor|gated|401|403" deploy.log | tail -5 | tr '\n' ' ' | cut -c1-900)
+            echo "::error title=Modal deploy failed::${err:-see the Deploy step log}"
+            exit 1
+          fi
+          url=$(grep -oE 'https://[A-Za-z0-9.-]+\.modal\.run' deploy.log | head -1)
+          echo "::notice title=Kalam is live::${url}  (health check: ${url}/health)"
+          {
+            echo "### Kalam is live"
+            echo ""
+            echo "- API: ${url}"
+            echo "- Health check: ${url}/health"
+            echo ""
+            echo "The first request after a quiet spell waits about a minute while the GPU container starts."
+          } >> "$GITHUB_STEP_SUMMARY"

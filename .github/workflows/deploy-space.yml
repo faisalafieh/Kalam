@@ -14,10 +14,9 @@
 
 name: Deploy to Hugging Face Space
 
+# Manual only: Hugging Face now requires a PRO subscription for Docker Spaces,
+# so the default deploy target is Modal (deploy-modal.yml).
 on:
-  push:
-    branches: [main]
-    paths: ["app.py", "arabic.py", "requirements.txt", "Dockerfile", ".github/workflows/deploy-space.yml"]
   workflow_dispatch:
 
 jobs:

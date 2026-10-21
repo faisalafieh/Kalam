@@ -73,7 +73,7 @@ def download_models():
 
 
 image = image.run_function(download_models, secrets=[modal.Secret.from_name("kalam-hf")]).add_local_python_source(
-    "app", "arabic"
+    "app", "arabic", "ui"
 )
 
 # Same name as the existing deployment, so its URL (…--kalam-api-web.modal.run) keeps working.

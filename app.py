@@ -20,8 +20,10 @@ from dataclasses import dataclass
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 import arabic
+import ui
 
 # ---- configuration (set these as environment variables on the host) --------
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")        # tiny | base | small | medium | large-v3
@@ -380,14 +382,10 @@ def run_pipeline(wav: str, asr, diar, req: Request | None = None) -> dict:
     return result
 
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def index():
-    """Landing response so opening the bare URL doesn't look broken."""
-    return {
-        "service": "Kalam transcription API",
-        "status": "ok",
-        "endpoints": {"POST /transcribe": "upload audio (form field 'audio')", "GET /health": "status"},
-    }
+    """The recorder/upload page (ui.py). The API itself is /transcribe and /health."""
+    return ui.PAGE
 
 
 @app.get("/health")

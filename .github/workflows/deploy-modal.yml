@@ -6,7 +6,8 @@
 #        MODAL_TOKEN_ID      (starts with ak-)
 #        MODAL_TOKEN_SECRET  (starts with as-)
 #        HF_TOKEN            Hugging Face token with the pyannote terms accepted
-#      Optional variable ALLOWED_ORIGINS = your frontend URL.
+#      Optional variables: ALLOWED_ORIGINS = your frontend URL;
+#      MODAL_GPU = T4 (only after adding a payment method on Modal, else CPU is used).
 #   3. Actions tab -> "Deploy to Modal" -> Run workflow.
 # Every push to main redeploys afterwards.
 
@@ -27,6 +28,8 @@ jobs:
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
+      MODAL_GPU: ${{ vars.MODAL_GPU }}      # e.g. T4 once a card is on the Modal account; empty = CPU
+      MODAL_MODEL: ${{ vars.MODAL_MODEL }}  # optional override of the Whisper model
     steps:
       - uses: actions/checkout@v4
 

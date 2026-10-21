@@ -6,9 +6,10 @@ Needs a Modal secret named "kalam-hf" holding HF_TOKEN (and optionally
 ALLOWED_ORIGINS); the workflow creates it from the GitHub secrets.
 
 Why these choices:
-- GPU (T4) with float16: large-v3 runs many times faster than real time, so the
-  most accurate Whisper model is affordable for both English and Arabic.
-- One model for every language: WHISPER_MODEL and ARABIC_MODEL are both large-v3,
+- GPU (T4, needs a card on the Modal account) with float16: large-v3 runs many
+  times faster than real time. Without a card it runs on 8 CPUs with
+  large-v3-turbo instead: slower, but no payment method needed.
+- One model for every language: WHISPER_MODEL and ARABIC_MODEL are the same,
   so a single copy is loaded and shared.
 - Models are downloaded while the image is built, so a cold start loads them from
   disk instead of re-downloading several GB.
@@ -16,10 +17,18 @@ Why these choices:
   while recordings are being transcribed. max_containers=1 caps the spend.
 """
 
+import os
+
 import modal
 
-MODEL = "large-v3"
-GPU = "T4"
+# GPU needs a payment method on the Modal account (free credits still apply).
+# Leave MODAL_GPU empty to run on CPUs, which works on a card-less account but is
+# several times slower; set it to "T4" (GitHub variable MODAL_GPU) once a card is added.
+GPU = os.environ.get("MODAL_GPU", "").strip() or None
+# On CPU, large-v3-turbo keeps waits reasonable; on GPU, full large-v3 is affordable.
+MODEL = os.environ.get("MODAL_MODEL", "").strip() or ("large-v3" if GPU else "large-v3-turbo")
+CPUS = 8.0
+MEMORY_MB = 16384
 SCALEDOWN = 300  # seconds a warm container waits for the next request
 
 image = (
@@ -38,8 +47,12 @@ image = (
     )
     .env({
         "HF_HOME": "/models",
-        "DEVICE": "cuda",
-        "COMPUTE_TYPE": "float16",
+        # Baked in so the container evaluates this file with the same settings as the deploy.
+        "MODAL_GPU": GPU or "",
+        "MODAL_MODEL": MODEL,
+        "DEVICE": "cuda" if GPU else "cpu",
+        "COMPUTE_TYPE": "float16" if GPU else "int8",
+        "OMP_NUM_THREADS": "8",
         "WHISPER_MODEL": MODEL,
         "ARABIC_MODEL": MODEL,
         "DIARIZE": "true",
@@ -69,6 +82,8 @@ app = modal.App("kalam-api", image=image)
 
 @app.function(
     gpu=GPU,
+    cpu=CPUS,
+    memory=MEMORY_MB,
     secrets=[modal.Secret.from_name("kalam-hf")],
     scaledown_window=SCALEDOWN,
     max_containers=1,

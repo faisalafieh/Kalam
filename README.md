@@ -20,6 +20,16 @@ POST /transcribe        multipart/form-data, field "audio"
 GET  /health
 ```
 
+Optional form fields on `/transcribe`:
+
+| Field | Values | Effect |
+|---|---|---|
+| `language` | `en`, `ar`, `mixed`, `auto` | Spoken language. `mixed` re-detects language on every segment, for Arabic–English code-switching. Default: `LANGUAGE` |
+| `dialect` | `auto`, `msa`, `gulf`, `levantine`, `egyptian`, `maghrebi` | Arabic dialect (ignored for English). `auto` guesses it from the opening seconds. Default: `DIALECT` |
+| `vocabulary` | comma-separated text, ≤ 500 chars | Names and terms to hint to Whisper throughout: judges, parties, firms, case terms |
+| `num_speakers` | 1–20 | Exact speaker count, if known. Big diarization gain |
+| `min_speakers`, `max_speakers` | 1–20 | Bounds when the exact count is unknown |
+
 Response:
 
 ```json
@@ -30,9 +40,49 @@ Response:
   ],
   "speakers": 2,
   "duration": 61.2,
-  "language": "en"
+  "language": "en",
+  "dialect": null,
+  "dialect_detected": false
 }
 ```
+
+## Arabic and dialects
+
+Whisper has a single `ar` language for every variety of Arabic and leans
+towards Modern Standard Arabic, so dialect words tend to get rewritten into MSA
+or dropped. Kalam handles this in three ways (code in `arabic.py`):
+
+1. **A bigger model for Arabic.** Small Whisper models are far weaker on Arabic
+   than on English. Arabic and mixed requests use `ARABIC_MODEL` (default
+   `large-v3`), loaded on the first Arabic request; English keeps `WHISPER_MODEL`.
+2. **A dialect primer on every window.** A short sentence written in the chosen
+   dialect (Gulf, Levantine, Egyptian, Maghrebi, or MSA court register) is passed
+   to Whisper as `hotwords`, which faster-whisper places in front of every 30 s
+   window, nudging the whole transcript towards that dialect's spelling and words.
+   Caller `vocabulary` is appended, so names and legal terms come out right too.
+3. **Automatic dialect choice.** With `dialect=auto`, the first
+   `DIALECT_PROBE_SECONDS` are transcribed and scored against marker words typical
+   of each dialect (e.g. شلون/وايد for Gulf, هلق/منيح for Levantine,
+   دلوقتي/عايز for Egyptian, دابا/بزاف for Maghrebi). This is a heuristic, not a
+   trained classifier: it only commits on clear evidence and otherwise uses the
+   MSA primer. The response reports which dialect was used.
+
+None of this is a measured accuracy claim. To get one, record speakers of each
+dialect, write the references by ear, and score each dialect as its own run:
+
+```bash
+LANGUAGE=ar DIALECT=gulf python eval/evaluate.py --manifest eval/data/gulf/manifest.jsonl --tag ar-gulf
+LANGUAGE=ar DIALECT=auto python eval/evaluate.py --manifest eval/data/gulf/manifest.jsonl --tag ar-gulf-auto
+```
+
+Arabic text is scored with Arabic normalisation (diacritics, alef/ya/ta marbuta
+variants, Arabic digits and punctuation unified) instead of Whisper's English
+normaliser. Compare a run with the dialect fixed against one with `auto` and one
+with `msa` to see what the primer is worth on your recordings.
+
+`large-v3` on CPU is slow (several times real time) and needs roughly 3–4 GB of
+RAM alongside pyannote; for Arabic in production a GPU host (Modal, or `DEVICE=cuda`
+with `COMPUTE_TYPE=float16`) is the practical option.
 
 ## Before it will run
 
@@ -126,6 +176,16 @@ output; a corrected machine transcript inherits its mistakes and inflates the
 score. Everything under `eval/data/` and cached transcripts under
 `eval/results/hyp/` are git-ignored, so private recordings stay local.
 
+## Tests
+
+```bash
+pip install pytest
+pytest tests/
+```
+
+The tests use stand-in models, so they run in under a second without
+downloading anything.
+
 ## Deploy
 
 Any host that runs a Dockerfile works. Memory is the binding constraint:
@@ -147,7 +207,14 @@ the browser will block the upload.
 |---|---|---|
 | `HF_TOKEN` | — | Hugging Face token, required for diarization |
 | `WHISPER_MODEL` | `small` | `tiny` and `base` are much faster on CPU and much less accurate |
-| `LANGUAGE` | `en` | Spoken language code, or `auto` to let Whisper detect it (unreliable with accented speakers) |
+| `LANGUAGE` | `en` | Default spoken language: `en`, `ar`, `mixed` (Arabic–English code-switching) or `auto` (unreliable with accented speakers) |
+| `DIALECT` | `auto` | Default Arabic dialect: `auto`, `msa`, `gulf`, `levantine`, `egyptian`, `maghrebi` |
+| `ARABIC_MODEL` | `large-v3` | Whisper model for Arabic and mixed requests |
+| `PRELOAD_ARABIC` | `false` | Load `ARABIC_MODEL` at startup instead of on the first Arabic request |
+| `DIALECT_PROBE_SECONDS` | `90` | Audio transcribed to guess the dialect when `dialect=auto` |
+| `VOCABULARY` | — | Comma-separated names/terms always hinted to Whisper |
+| `AUDIO_FILTER` | — | ffmpeg filter applied on conversion, e.g. `highpass=f=80,loudnorm` for quiet distant speakers. Test on dev data first |
+| `HALLUCINATION_SILENCE` | `0` | Seconds; skip long silences where Whisper appears to hallucinate (needs word-level speakers). `0` = off |
 | `BEAM_SIZE` | `5` | Beam search width; `1` is faster but drops more speech |
 | `CONDITION_ON_PREVIOUS` | `false` | Feed each window the previous text; `true` can cause repetition loops on long audio |
 | `SEPARATE` | `false` | Separate overlapping speakers into one stream each before transcribing (needs `pyannote.audio[separation]`, a GPU, and accepted terms on `pyannote/speech-separation-ami-1.0`) |

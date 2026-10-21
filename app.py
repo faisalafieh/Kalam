@@ -2,8 +2,11 @@
 Transcription + speaker attribution API.
 
 POST /transcribe   multipart/form-data, field name "audio"
+  optional fields: language (en | ar | mixed | auto), dialect (auto | msa | gulf |
+  levantine | egyptian | maghrebi), vocabulary (comma-separated names/terms),
+  num_speakers / min_speakers / max_speakers
   -> {"segments": [{"speaker": "SPEAKER_00", "start": 0.0, "end": 2.4, "text": "..."}],
-      "speakers": 2, "duration": 61.2}
+      "speakers": 2, "duration": 61.2, "language": "ar", "dialect": "gulf"}
 
 GET  /health       -> {"status": "ok", "model": "...", "diarization": true}
 """
@@ -13,9 +16,12 @@ import shutil
 import subprocess
 import tempfile
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+
+import arabic
 
 # ---- configuration (set these as environment variables on the host) --------
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")        # tiny | base | small | medium | large-v3
@@ -27,7 +33,28 @@ ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 MAX_MB = int(os.getenv("MAX_MB", "200"))
 # Fix the spoken language. "auto" lets Whisper guess from the first 30 s, which
 # fails on accented speakers (e.g. Dutch speakers of English get Dutch output).
+# "mixed" re-detects the language on every segment, for Arabic-English code-switching.
+# Callers can override this per request.
 LANGUAGE = os.getenv("LANGUAGE", "en")
+# Arabic dialect: auto | msa | gulf | levantine | egyptian | maghrebi (see arabic.py).
+DIALECT = os.getenv("DIALECT", "auto")
+# Whisper model for Arabic and mixed requests. Small Whisper models are much weaker
+# on Arabic than on English, so Arabic gets its own (larger) model, loaded on the
+# first Arabic request unless PRELOAD_ARABIC is set.
+ARABIC_MODEL = os.getenv("ARABIC_MODEL", "large-v3")
+PRELOAD_ARABIC = os.getenv("PRELOAD_ARABIC", "false").lower() == "true"
+# Seconds of audio transcribed to guess the dialect when dialect is "auto".
+DIALECT_PROBE_SECONDS = int(os.getenv("DIALECT_PROBE_SECONDS", "90"))
+# Names and terms to hint to Whisper on every window (judges, parties, case terms),
+# comma-separated. Requests can add their own.
+VOCABULARY = os.getenv("VOCABULARY", "")
+# Optional ffmpeg audio filter applied while converting, e.g.
+# "highpass=f=80,loudnorm" lifts quiet, far-from-the-mic speakers. Off by default:
+# measure on your dev recordings before switching it on.
+AUDIO_FILTER = os.getenv("AUDIO_FILTER", "")
+# With word timestamps on, skip silent stretches longer than this many seconds when
+# Whisper looks like it is hallucinating into silence. 0 = off.
+HALLUCINATION_SILENCE = float(os.getenv("HALLUCINATION_SILENCE", "0")) or None
 BEAM_SIZE = int(os.getenv("BEAM_SIZE", "5"))                # 1 = greedy: faster, skips more speech
 # Conditioning each 30 s window on the previous text lets one bad window derail
 # the rest (repetition loops, skipped stretches). Off is safer for long meetings.
@@ -43,17 +70,33 @@ SEPARATION_MODEL = "pyannote/speech-separation-ami-1.0"
 DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
 # ---------------------------------------------------------------------------
 
-state = {"asr": None, "diar": None}
+state = {"asr": None, "diar": None, "models": {}}
+
+ARABIC_LANGUAGES = ("ar", "mixed")
+
+
+def model_for(language: str) -> str:
+    """Which Whisper checkpoint serves this language setting."""
+    return ARABIC_MODEL if language in ARABIC_LANGUAGES else WHISPER_MODEL
+
+
+def get_whisper(name: str):
+    """Load a Whisper model once and reuse it across requests."""
+    from faster_whisper import WhisperModel
+
+    models = state.setdefault("models", {})
+    if name not in models:
+        models[name] = WhisperModel(name, device=DEVICE, compute_type=COMPUTE_TYPE)
+    return models[name]
 
 
 def load_models():
     """Load the ASR model and (optionally) the diarization pipeline.
 
     Shared by the API server and eval/evaluate.py so both run identical models.
+    The ASR model is the one for the configured LANGUAGE.
     """
-    from faster_whisper import WhisperModel
-
-    asr = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
+    asr = get_whisper(model_for(LANGUAGE))
     diar = None
     if DIARIZE:
         if not HF_TOKEN:
@@ -75,6 +118,8 @@ def load_models():
 async def lifespan(app: FastAPI):
     """Load models once at startup rather than per request."""
     state["asr"], state["diar"] = load_models()
+    if PRELOAD_ARABIC:
+        get_whisper(ARABIC_MODEL)
     yield
     state.clear()
 
@@ -91,8 +136,9 @@ app.add_middleware(
 
 def to_wav(src: str, dst: str) -> None:
     """Normalise any container the browser sends into 16 kHz mono PCM."""
+    filters = ["-af", AUDIO_FILTER] if AUDIO_FILTER else []
     result = subprocess.run(
-        ["ffmpeg", "-y", "-i", src, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", dst],
+        ["ffmpeg", "-y", "-i", src, *filters, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", dst],
         capture_output=True,
     )
     if result.returncode != 0:
@@ -190,16 +236,75 @@ def load_wav(path: str):
     return np.ascontiguousarray(audio)
 
 
-def _asr_options() -> dict:
-    return dict(
-        language=None if LANGUAGE == "auto" else LANGUAGE,
+@dataclass
+class Request:
+    """Per-recording settings. Defaults come from the environment."""
+
+    language: str = LANGUAGE
+    dialect: str = DIALECT
+    vocabulary: str = VOCABULARY
+    num_speakers: int | None = None
+    min_speakers: int | None = None
+    max_speakers: int | None = None
+
+    @property
+    def is_arabic(self) -> bool:
+        return self.language in ARABIC_LANGUAGES
+
+
+def hints(req: Request, dialect: str | None) -> str | None:
+    """Text passed to Whisper as hotwords: dialect primer plus caller vocabulary."""
+    parts = []
+    if dialect in arabic.PRIMERS:
+        parts.append(arabic.PRIMERS[dialect])
+    terms = [t.strip() for t in req.vocabulary.split(",") if t.strip()]
+    if terms:
+        parts.append("، ".join(terms) if dialect else ", ".join(terms))
+    return " ".join(parts) or None
+
+
+def _asr_options(req: Request | None = None, hotwords: str | None = None) -> dict:
+    req = req or Request()
+    lang = req.language
+    opts = dict(
+        language=None if lang in ("auto", "mixed") else lang,
         beam_size=BEAM_SIZE,
         condition_on_previous_text=CONDITION_ON_PREVIOUS,
         vad_filter=True,
     )
+    if lang == "mixed":
+        opts["multilingual"] = True  # detect the language on every segment
+    if hotwords:
+        opts["hotwords"] = hotwords
+    return opts
 
 
-def run_separated(wav: str, asr, sep) -> dict:
+def resolve_dialect(audio, asr, req: Request) -> tuple[str | None, bool]:
+    """Return (dialect, was_detected). None for non-Arabic requests.
+
+    With dialect "auto", transcribe the opening DIALECT_PROBE_SECONDS as plain
+    Arabic and score it against dialect marker words (arabic.detect_dialect).
+    """
+    if not req.is_arabic:
+        return None, False
+    if req.dialect != "auto":
+        return req.dialect, False
+    probe = audio[: DIALECT_PROBE_SECONDS * 16000]
+    segments, _ = asr.transcribe(
+        probe, language="ar", beam_size=BEAM_SIZE, condition_on_previous_text=False, vad_filter=True
+    )
+    dialect, _ = arabic.detect_dialect(" ".join(s.text for s in segments))
+    return dialect, True
+
+
+def speaker_hints(req: Request) -> dict:
+    """Known speaker counts sharply cut diarization errors; pass them when given."""
+    if req.num_speakers:
+        return {"num_speakers": req.num_speakers}
+    return {k: v for k, v in (("min_speakers", req.min_speakers), ("max_speakers", req.max_speakers)) if v}
+
+
+def run_separated(wav: str, asr, sep, req: Request | None = None, opts: dict | None = None) -> dict:
     """Separation mode: one isolated stream per speaker, each transcribed alone.
 
     Every word in a stream belongs to that stream's speaker, so overlapping speech
@@ -207,7 +312,9 @@ def run_separated(wav: str, asr, sep) -> dict:
     """
     import numpy as np
 
-    diarization, sources = sep(wav)
+    req = req or Request()
+    opts = opts or _asr_options(req)
+    diarization, sources = sep(wav, **speaker_hints(req))
     out, language, duration = [], None, 0.0
     # Source column s belongs to the s-th label (pyannote model card convention).
     for s, speaker in enumerate(diarization.labels()):
@@ -218,7 +325,7 @@ def run_separated(wav: str, asr, sep) -> dict:
         if peak < 1e-4:
             continue  # silent stream
         audio *= 0.9 / peak  # separated streams come out at arbitrary gain
-        segments, info = asr.transcribe(audio, **_asr_options())
+        segments, info = asr.transcribe(audio, **opts)
         language = language or info.language
         duration = max(duration, info.duration)
         for seg in segments:
@@ -237,31 +344,40 @@ def run_separated(wav: str, asr, sep) -> dict:
     }
 
 
-def run_pipeline(wav: str, asr, diar) -> dict:
+def run_pipeline(wav: str, asr, diar, req: Request | None = None) -> dict:
     """Transcribe a 16 kHz mono wav and attribute each segment to a speaker.
 
     This is the whole Kalam pipeline; /transcribe and eval/evaluate.py both call it.
     """
+    req = req or Request()
+    audio = load_wav(wav)
+    dialect, detected = resolve_dialect(audio, asr, req)
+    opts = _asr_options(req, hints(req, dialect))
+
     if SEPARATE and diar is not None:
-        return run_separated(wav, asr, diar)
-    segments, info = asr.transcribe(
-        load_wav(wav), word_timestamps=WORD_SPEAKERS and diar is not None, **_asr_options()
-    )
-    segments = list(segments)
+        result = run_separated(wav, asr, diar, req, opts)
+    else:
+        word_ts = WORD_SPEAKERS and diar is not None
+        if word_ts and HALLUCINATION_SILENCE:
+            opts["hallucination_silence_threshold"] = HALLUCINATION_SILENCE
+        segments, info = asr.transcribe(audio, word_timestamps=word_ts, **opts)
+        segments = list(segments)
 
-    turns = []
-    if diar is not None:
-        turns = list(diar(wav).itertracks(yield_label=True))
+        turns = []
+        if diar is not None:
+            turns = list(diar(wav, **speaker_hints(req)).itertracks(yield_label=True))
 
-    out = attribute(segments, SpeakerIndex(turns))
-
-    return {
-        "segments": out,
-        "speakers": len({s["speaker"] for s in out}),
-        "duration": round(info.duration, 1),
-        "language": info.language,
-        "turns": [(t.start, t.end, label) for t, _, label in turns],
-    }
+        out = attribute(segments, SpeakerIndex(turns))
+        result = {
+            "segments": out,
+            "speakers": len({s["speaker"] for s in out}),
+            "duration": round(info.duration, 1),
+            "language": info.language,
+            "turns": [(t.start, t.end, label) for t, _, label in turns],
+        }
+    result["dialect"] = dialect
+    result["dialect_detected"] = detected
+    return result
 
 
 @app.get("/health")
@@ -269,14 +385,52 @@ def health():
     return {
         "status": "ok",
         "model": WHISPER_MODEL,
+        "arabic_model": ARABIC_MODEL,
+        "loaded_models": sorted(state.get("models", {})),
         "diarization": state.get("diar") is not None,
     }
 
 
+LANGUAGE_CHOICES = ("en", "ar", "mixed", "auto")
+
+
+def build_request(language, dialect, vocabulary, num_speakers, min_speakers, max_speakers) -> Request:
+    req = Request()
+    if language:
+        language = language.strip().lower()
+        if language not in LANGUAGE_CHOICES:
+            raise HTTPException(400, f"language must be one of {', '.join(LANGUAGE_CHOICES)}")
+        req.language = language
+    if dialect:
+        dialect = dialect.strip().lower()
+        if dialect not in ("auto", *arabic.DIALECTS):
+            raise HTTPException(400, f"dialect must be auto or one of {', '.join(arabic.DIALECTS)}")
+        req.dialect = dialect
+    if vocabulary:
+        if len(vocabulary) > 500:
+            raise HTTPException(400, "vocabulary is limited to 500 characters")
+        req.vocabulary = ", ".join(t for t in (VOCABULARY, vocabulary) if t)
+    for name, value in (("num_speakers", num_speakers), ("min_speakers", min_speakers),
+                        ("max_speakers", max_speakers)):
+        if value is not None and not 1 <= value <= 20:
+            raise HTTPException(400, f"{name} must be between 1 and 20")
+        setattr(req, name, value)
+    return req
+
+
 @app.post("/transcribe")
-async def transcribe(audio: UploadFile = File(...)):
+async def transcribe(
+    audio: UploadFile = File(...),
+    language: str | None = Form(None),
+    dialect: str | None = Form(None),
+    vocabulary: str | None = Form(None),
+    num_speakers: int | None = Form(None),
+    min_speakers: int | None = Form(None),
+    max_speakers: int | None = Form(None),
+):
     if state["asr"] is None:
         raise HTTPException(503, "Model still loading, try again in a moment.")
+    req = build_request(language, dialect, vocabulary, num_speakers, min_speakers, max_speakers)
 
     workdir = tempfile.mkdtemp()
     try:
@@ -291,7 +445,8 @@ async def transcribe(audio: UploadFile = File(...)):
         wav = os.path.join(workdir, "audio.wav")
         to_wav(raw, wav)
 
-        result = run_pipeline(wav, state["asr"], state["diar"])
+        asr = state["asr"] if model_for(req.language) == model_for(LANGUAGE) else get_whisper(model_for(req.language))
+        result = run_pipeline(wav, asr, state["diar"], req)
         result.pop("turns")  # raw diarization turns are only needed for evaluation
         return result
     finally:

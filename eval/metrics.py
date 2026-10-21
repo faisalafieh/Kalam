@@ -16,11 +16,16 @@ not an average of per-file percentages.
 
 from __future__ import annotations
 
+import sys
 from collections import defaultdict
+from pathlib import Path
 
 import jiwer
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import arabic  # noqa: E402
 
 try:
     from whisper_normalizer.english import EnglishTextNormalizer
@@ -36,7 +41,13 @@ except ImportError:  # fallback keeps the script usable, but numbers are stricte
 
 def normalize(text: str) -> str:
     """Whisper's English normaliser: lowercase, strip punctuation, spell out
-    contractions, standardise numbers and spelling, drop fillers (um, uh)."""
+    contractions, standardise numbers and spelling, drop fillers (um, uh).
+
+    Text containing Arabic script gets the Arabic normaliser instead (diacritics,
+    alef/ya/ta marbuta variants, Arabic digits, punctuation); the English one would
+    strip or mangle Arabic letters."""
+    if arabic.has_arabic(text):
+        return arabic.normalize_arabic(text)
     return " ".join(_normalize(text).split())
 
 

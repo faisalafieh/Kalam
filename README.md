@@ -194,6 +194,7 @@ be killed mid-request.
 
 | Host | Notes |
 |---|---|
+| Hugging Face Spaces | **Free** (2 CPU, 16 GB RAM). `.github/workflows/deploy-space.yml` deploys on every push to main once the `HF_TOKEN` repo secret is set; setup steps are at the top of that file. Sleeps when idle, slow on CPU. |
 | Render | Docker runtime, `render.yaml` included. Free tier too small for diarization; the paid starter instance fits. |
 | Modal | Serverless, charges per second of execution, free monthly credits. Best fit if the model needs a GPU. |
 | Fly.io | Scale-to-zero, small always-free allowance. |

@@ -57,7 +57,8 @@ jobs:
         run: |
           set -o pipefail
           if ! modal deploy modal_app.py 2>&1 | tee deploy.log; then
-            err=$(grep -iE "error|exception|denied|unauthor|gated|401|403" deploy.log | tail -5 | tr '\n' ' ' | cut -c1-900)
+            err=$(sed -n '/Error ─/,$p' deploy.log | tr -d '│╭╮╰╯─' | tr -s ' \n' ' ' | cut -c1-1500)
+            [ -z "$err" ] && err=$(tail -25 deploy.log | tr -s ' \n' ' ' | cut -c1-1500)
             echo "::error title=Modal deploy failed::${err:-see the Deploy step log}"
             exit 1
           fi

@@ -63,7 +63,8 @@ image = image.run_function(download_models, secrets=[modal.Secret.from_name("kal
     "app", "arabic"
 )
 
-app = modal.App("kalam", image=image)
+# Same name as the existing deployment, so its URL (…--kalam-api-web.modal.run) keeps working.
+app = modal.App("kalam-api", image=image)
 
 
 @app.function(

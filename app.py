@@ -380,6 +380,16 @@ def run_pipeline(wav: str, asr, diar, req: Request | None = None) -> dict:
     return result
 
 
+@app.get("/")
+def index():
+    """Landing response so opening the bare URL doesn't look broken."""
+    return {
+        "service": "Kalam transcription API",
+        "status": "ok",
+        "endpoints": {"POST /transcribe": "upload audio (form field 'audio')", "GET /health": "status"},
+    }
+
+
 @app.get("/health")
 def health():
     return {

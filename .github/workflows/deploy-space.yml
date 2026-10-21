@@ -50,14 +50,31 @@ jobs:
           SPACE_NAME: ${{ vars.SPACE_NAME }}
         run: |
           python - <<'PY'
-          import os, shutil, tempfile
+          import os, shutil, sys, tempfile
           from huggingface_hub import HfApi
 
-          api = HfApi(token=os.environ["HF_TOKEN"])
-          user = api.whoami()["name"]
+          def fail(step, err):
+              msg = str(err).replace("\n", " ")[:500]
+              hint = ""
+              if "401" in msg or "Invalid" in msg or "credentials" in msg:
+                  hint = " The HF_TOKEN secret is not a valid Hugging Face token: re-copy it (no spaces) or create a new one."
+              elif "403" in msg:
+                  hint = " The token is read-only or fine-grained without repo write access: create a token with the WRITE role."
+              print(f"::error title=Failed at: {step}::{type(err).__name__}: {msg}{hint}")
+              sys.exit(1)
+
+          api = HfApi(token=os.environ["HF_TOKEN"].strip())
+          try:
+              user = api.whoami()["name"]
+              print(f"::notice::Hugging Face account: {user}")
+          except Exception as e:
+              fail("checking the token (whoami)", e)
           repo_id = f"{user}/{os.environ.get('SPACE_NAME') or 'kalam'}"
 
-          api.create_repo(repo_id, repo_type="space", space_sdk="docker", exist_ok=True)
+          try:
+              api.create_repo(repo_id, repo_type="space", space_sdk="docker", exist_ok=True)
+          except Exception as e:
+              fail(f"creating the Space {repo_id}", e)
 
           stage = tempfile.mkdtemp()
           for f in ("Dockerfile", "app.py", "arabic.py", "requirements.txt"):
@@ -77,12 +94,18 @@ jobs:
                   "https://github.com/faisalafieh/Kalam by GitHub Actions; edit there, not here.\n"
               )
 
-          api.add_space_secret(repo_id, "HF_TOKEN", os.environ.get("PYANNOTE_TOKEN") or os.environ["HF_TOKEN"])
-          api.add_space_variable(repo_id, "ALLOWED_ORIGINS", os.environ.get("ALLOWED_ORIGINS") or "*")
-          api.add_space_variable(repo_id, "ARABIC_MODEL", os.environ.get("ARABIC_MODEL") or "large-v3-turbo")
+          try:
+              api.add_space_secret(repo_id, "HF_TOKEN", (os.environ.get("PYANNOTE_TOKEN") or os.environ["HF_TOKEN"]).strip())
+              api.add_space_variable(repo_id, "ALLOWED_ORIGINS", os.environ.get("ALLOWED_ORIGINS") or "*")
+              api.add_space_variable(repo_id, "ARABIC_MODEL", os.environ.get("ARABIC_MODEL") or "large-v3-turbo")
+          except Exception as e:
+              fail("setting the Space secret and variables", e)
 
-          api.upload_folder(folder_path=stage, repo_id=repo_id, repo_type="space",
-                            commit_message=f"Deploy {os.environ.get('GITHUB_SHA', '')[:7]}")
+          try:
+              api.upload_folder(folder_path=stage, repo_id=repo_id, repo_type="space",
+                                commit_message=f"Deploy {os.environ.get('GITHUB_SHA', '')[:7]}")
+          except Exception as e:
+              fail("uploading the code to the Space", e)
 
           host = repo_id.lower().replace("/", "-").replace("_", "-").replace(".", "-")
           url = f"https://{host}.hf.space"

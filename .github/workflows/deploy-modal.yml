@@ -75,3 +75,18 @@ jobs:
             echo ""
             echo "The first request after a quiet spell waits about a minute while the GPU container starts."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Health check
+        run: |
+          url=$(grep -oE 'https://[A-Za-z0-9.-]+\.modal\.run' deploy.log | head -1)
+          # A cold start loads the models, so allow a few minutes.
+          for i in $(seq 1 12); do
+            body=$(curl -sS -m 120 "$url/health" || true)
+            if echo "$body" | grep -q '"status"'; then
+              echo "::notice title=Health check passed::$body"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error title=Health check failed::$url/health did not answer: ${body:-no response}"
+          exit 1
